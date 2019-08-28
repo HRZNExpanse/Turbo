@@ -83,8 +83,6 @@ task downloadMinecraft(type: Exec) {
         }
     }
 
-    println(configurations.mcl.asPath.split(";"))
-
     def merger = new JarMerger(new File("minecraft/minecraft-client.1.14.4.jar"), new File("minecraft/minecraft-server.1.14.4.jar"), new File("minecraft/minecraft.1.14.4.jar"))
     merger.enableSyntheticParamsOffset()
     merger.merge()
@@ -175,14 +173,14 @@ abstract class Remapping implements TransformAction<Parameters> {
         def remapper = TinyRemapper.newRemapper().withMappings(TinyRemapperMappingsHelper.create(MappingsCache.INSTANCE.get(mappingFile.toPath()), "official", "named")).renameInvalidLocals(true).rebuildSourceFilenames(true).build()
 
         try {
-            println(":remapping ${output.toPath().toString()}")
+            println(":remapping")
             OutputConsumerPath outputConsumer = new OutputConsumerPath.Builder(output.toPath()).build()
             outputConsumer.addNonClassFiles(inputPath);
             remapper.readClassPath(parameters.paths.get().toArray(new java.nio.file.Path[0]));
             remapper.readInputs(inputPath)
             remapper.apply(outputConsumer)
+            println(":finished remapping")
         } catch (Exception e) {
-            println(":error")
             throw new RuntimeException("Failed to remap JAR", e);
         } finally {
             remapper.finish();
