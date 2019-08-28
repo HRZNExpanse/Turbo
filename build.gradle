@@ -1,0 +1,109 @@
+buildscript {
+    repositories {
+    }
+    dependencies {
+    }
+}
+plugins {
+    id 'java-library'
+}
+
+group 'com.hrznstudio'
+version '1.0.0'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+def artifactType = Attribute.of('artifactType', String)
+def mapping = Attribute.of('mapping', String)
+def remapped = Attribute.of('remapped', Boolean)
+def yarn = "build.12"
+dependencies {
+    attributesSchema {
+        attribute(mapping)
+        attribute(remapped)
+    }
+    artifactTypes.getByName("jar") {
+        attributes.attribute(mapping, "none").attribute(remapped, false)
+    }
+}
+
+configurations.all {
+    afterEvaluate {
+        if (canBeResolved) {
+            attributes.attribute(remapped, true)
+        }
+    }
+}
+
+def valid = [
+        "minecraft"
+]
+
+dependencies {
+    registerTransform(Remapping) {
+        from.attribute(remapped,false).attribute(mapping, "none").attribute(artifactType, "jar")
+        to.attribute(remapped,true).attribute(mapping, "build.12").attribute(artifactType, "jar")
+
+        parameters {
+            toTransform = valid
+            map = "build.12"
+        }
+    }
+}
+def download(String remoteUrl, String localUrl) {
+    new File("$localUrl").withOutputStream { out ->
+        new URL(remoteUrl).withInputStream { from ->  out << from; }
+    }
+}
+task downloadMinecraft(type: Exec) {
+    download("https://launcher.mojang.com/v1/objects/8c325a0c5bd674dd747d6ebaa4c791fd363ad8a9/client.jar", "build/libs/minecraft.1.14.4.jar")
+    outputs.file("build/libs/minecraft.1.14.4.jar")
+}
+
+dependencies {
+    implementation('com.google.guava:guava:27.1-jre')
+    api(files('build/libs/minecraft.1.14.4.jar') {
+        builtBy downloadMinecraft
+    })
+}
+
+abstract class Remapping implements TransformAction<Parameters> {
+    interface Parameters extends TransformParameters {
+        @Input
+        Set<String> getToTransform()
+
+        void setToTransform(Set<String> toTransform)
+
+        @Input
+        String getMap()
+
+        void setMap(String mapping)
+    }
+
+    @PathSensitive(PathSensitivity.NAME_ONLY)
+    @InputArtifact
+    abstract Provider<FileSystemLocation> getInputArtifact()
+
+    @Override
+    void transform(TransformOutputs outputs) {
+        def fileName = inputArtifact.get().asFile.name
+        for (entry in parameters.toTransform) {
+            if (fileName.startsWith(entry)) {
+                def nameWithoutExtension = fileName.substring(0, fileName.length() - 4)
+                remap(inputArtifact.get().asFile, outputs.file("${nameWithoutExtension}-remapped-${parameters.map}.jar"));
+                return
+            }
+        }
+
+        outputs.file(inputArtifact)
+    }
+    private void remap(File original, File output) {
+        println "Remapping ${original.name} to ${parameters.map}"
+        //TODO
+        output << original
+    }
+}
