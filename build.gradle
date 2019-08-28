@@ -1,11 +1,28 @@
+import com.google.gson.Gson
+import net.fabricmc.loom.providers.MappingsCache
+import net.fabricmc.loom.util.MinecraftVersionInfo
+import net.fabricmc.loom.util.TinyRemapperMappingsHelper
+import net.fabricmc.stitch.merge.JarMerger
+import net.fabricmc.tinyremapper.TinyRemapper
+import net.fabricmc.tinyremapper.OutputConsumerPath
+
+import java.nio.file.Paths
+import java.util.concurrent.Callable
+import java.util.function.Function
+
 buildscript {
     repositories {
+        maven {
+            url = "https://maven.fabricmc.net"
+        }
     }
     dependencies {
+        classpath "net.fabricmc:fabric-loom:0.2.5-SNAPSHOT"
     }
 }
 plugins {
     id 'java-library'
+    id "de.undercouch.download" version "4.0.0"
 }
 
 group 'com.hrznstudio'
@@ -17,6 +34,15 @@ repositories {
     mavenCentral()
 }
 
+def valid = [
+        "minecraft"
+]
+
+repositories {
+    maven {
+        url = "https://libraries.minecraft.net/"
+    }
+}
 def artifactType = Attribute.of('artifactType', String)
 def mapping = Attribute.of('mapping', String)
 def remapped = Attribute.of('remapped', Boolean)
@@ -31,17 +57,54 @@ dependencies {
     }
 }
 
-configurations.all {
+configurations {
+    minecraft
+    mcl
+}
+task downloadMinecraft(type: Exec) {
+    FileReader reader = new FileReader(new File("version/1.14.4.json"))
+    Gson gson = new Gson();
+    MinecraftVersionInfo versionInfo = gson.fromJson(reader, MinecraftVersionInfo.class)
+
+    download {
+        src "https://launcher.mojang.com/v1/objects/8c325a0c5bd674dd747d6ebaa4c791fd363ad8a9/client.jar"
+        dest 'minecraft/minecraft-client.1.14.4.jar'
+        onlyIfModified true
+    }
+    download {
+        src "https://launcher.mojang.com/v1/objects/3dc3d84a581f14691199cf6831b71ed1296a9fdf/server.jar"
+        dest 'minecraft/minecraft-server.1.14.4.jar'
+        onlyIfModified true
+    }
+
+    for (MinecraftVersionInfo.Library library : versionInfo.libraries) {
+        if(library.allowed()) {
+            project.dependencies.add("mcl", project.dependencies.module(library.getArtifactName()))
+        }
+    }
+
+    println(configurations.mcl.asPath.split(";"))
+
+    def merger = new JarMerger(new File("minecraft/minecraft-client.1.14.4.jar"), new File("minecraft/minecraft-server.1.14.4.jar"), new File("minecraft/minecraft.1.14.4.jar"))
+    merger.enableSyntheticParamsOffset()
+    merger.merge()
+    outputs.file('minecraft/minecraft.1.14.4.jar')
+}
+
+dependencies {
+    implementation('com.google.guava:guava:27.1-jre')
+    minecraft(files('minecraft/minecraft.1.14.4.jar') {
+        builtBy downloadMinecraft
+    })
+}
+
+configurations.minecraft {
     afterEvaluate {
         if (canBeResolved) {
-            attributes.attribute(remapped, true)
+//            attributes.attribute(remapped, true)
         }
     }
 }
-
-def valid = [
-        "minecraft"
-]
 
 dependencies {
     registerTransform(Remapping) {
@@ -51,25 +114,21 @@ dependencies {
         parameters {
             toTransform = valid
             map = "build.12"
+            paths = new Callable<Set<java.nio.file.Path>>() {
+                @Override
+                Set<java.nio.file.Path> call() throws Exception {
+                    return configurations.mcl.asPath.split(";").collect().stream().map(new Function<String,java.nio.file.Path>() {
+                        @Override
+                        java.nio.file.Path apply(String s) {
+                            return Paths.get(s)
+                        }
+                    }).toArray(new java.nio.file.Path[0])
+                }
+            }
         }
     }
 }
-def download(String remoteUrl, String localUrl) {
-    new File("$localUrl").withOutputStream { out ->
-        new URL(remoteUrl).withInputStream { from ->  out << from; }
-    }
-}
-task downloadMinecraft(type: Exec) {
-    download("https://launcher.mojang.com/v1/objects/8c325a0c5bd674dd747d6ebaa4c791fd363ad8a9/client.jar", "build/libs/minecraft.1.14.4.jar")
-    outputs.file("build/libs/minecraft.1.14.4.jar")
-}
 
-dependencies {
-    implementation('com.google.guava:guava:27.1-jre')
-    api(files('build/libs/minecraft.1.14.4.jar') {
-        builtBy downloadMinecraft
-    })
-}
 
 abstract class Remapping implements TransformAction<Parameters> {
     interface Parameters extends TransformParameters {
@@ -82,6 +141,11 @@ abstract class Remapping implements TransformAction<Parameters> {
         String getMap()
 
         void setMap(String mapping)
+
+        @Input
+        Callable<Set<java.nio.file.Path>> getPaths()
+
+        void setPaths(Callable<Set<java.nio.file.Path>> paths)
     }
 
     @PathSensitive(PathSensitivity.NAME_ONLY)
@@ -94,16 +158,34 @@ abstract class Remapping implements TransformAction<Parameters> {
         for (entry in parameters.toTransform) {
             if (fileName.startsWith(entry)) {
                 def nameWithoutExtension = fileName.substring(0, fileName.length() - 4)
-                remap(inputArtifact.get().asFile, outputs.file("${nameWithoutExtension}-remapped-${parameters.map}.jar"));
+                remap(inputArtifact.get().asFile, outputs.file("${nameWithoutExtension}-mapped-${parameters.map}.jar"));
                 return
             }
         }
 
         outputs.file(inputArtifact)
     }
+
     private void remap(File original, File output) {
-        println "Remapping ${original.name} to ${parameters.map}"
-        //TODO
-        output << original
+        println(":remapping ${original.name} to ${parameters.map}")
+
+        def mappingFile = new File(original.parentFile.parentFile, "mapping/${parameters.map}.tiny")
+        def inputPath = original.toPath()
+
+        def remapper = TinyRemapper.newRemapper().withMappings(TinyRemapperMappingsHelper.create(MappingsCache.INSTANCE.get(mappingFile.toPath()), "official", "named")).renameInvalidLocals(true).rebuildSourceFilenames(true).build()
+
+        try {
+            println(":remapping ${output.toPath().toString()}")
+            OutputConsumerPath outputConsumer = new OutputConsumerPath.Builder(output.toPath()).build()
+            outputConsumer.addNonClassFiles(inputPath);
+            remapper.readClassPath(parameters.paths.get().toArray(new java.nio.file.Path[0]));
+            remapper.readInputs(inputPath)
+            remapper.apply(outputConsumer)
+        } catch (Exception e) {
+            println(":error")
+            throw new RuntimeException("Failed to remap JAR", e);
+        } finally {
+            remapper.finish();
+        }
     }
 }
